@@ -66,6 +66,10 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
+- Added a `resolveVersion` test pinning that an explicit whitespace-only
+  `token` is treated as "no token" — the tag-lookup request carries no
+  `Authorization` header at all, matching the documented empty-secret
+  handling ([#262]).
 - Added a `resolveVersion` test simulating a timed-out tags-page request
   (a `"timeout"` event from the underlying `https.get` request), pinning
   that the documented "never throws" contract holds for `fetchTagsPage`'s
