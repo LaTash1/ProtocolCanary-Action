@@ -394,6 +394,35 @@ describe("ensureCanaryInstalled", () => {
     expect(installCalls()).toHaveLength(0);
   });
 
+  // #273: selectExpectedChecksum filters to stellar-canary-named entries,
+  // tries a platform+arch match, then a platform-only match, and otherwise
+  // falls back to a single unambiguous candidate. With several
+  // stellar-canary entries for *other* platforms and none for this runner's,
+  // every branch falls through and the lookup returns undefined — which must
+  // degrade to commit/tag pinning exactly like the no-entries-at-all case,
+  // not fail the install. This pins that specific fallthrough.
+  it("falls back to commit/tag pinning when the manifest names only other platforms' binaries (#273)", async () => {
+    fs.writeFileSync(binaryPath(), "binary");
+    // Pick two platforms this runner is definitively not on, so neither a
+    // platform+arch nor a platform-only match can succeed on any runner OS
+    // the suite executes on (no runner is both linux and darwin or win32,
+    // and the pair is recomputed from the actual process.platform).
+    const otherPlatforms = process.platform === "linux" ? ["darwin", "win32"] : ["linux", "win32"];
+    const manifest = [
+      `${"a".repeat(64)}  stellar-canary-${otherPlatforms[0]}-x64`,
+      `${"b".repeat(64)}  stellar-canary-${otherPlatforms[1]}-arm64`,
+      "",
+    ].join("\n");
+    mockPublishedChecksums(manifest);
+
+    const installed = await ensureCanaryInstalled(RESOLVED);
+
+    expect(installed).toEqual({ binaryPath: binaryPath(), version: "0.1.0" });
+    expect(installCalls()).toHaveLength(0);
+    // The degradation is deliberate, not silent luck: it is logged at debug.
+    expect(coreMocks.debugMock).toHaveBeenCalledWith(expect.stringContaining("no entry for this platform"));
+  });
+
   // #275: parseChecksumManifest documents tolerance for the standard
   // sha256sum output format — `#` comment lines and the `*` binary-mode
   // marker before the file name — but nothing exercised either. Pinned
@@ -437,6 +466,62 @@ describe("ensureCanaryInstalled", () => {
       );
       expect(error).toBeInstanceOf(InstallationFailedError);
       expect((error as InstallationFailedError).message).toContain("d".repeat(64));
+    });
+  });
+
+  // #274: selectExpectedChecksum prefers a platform+arch match but falls
+  // back to a platform-only one when the manifest names binaries per
+  // platform without distinguishing architecture (e.g. a single
+  // stellar-canary-linux entry). Pinned through the observable outcome:
+  // the platform-only entry's checksum must be the one selected, so the
+  // binary whose hash matches it verifies and a differently-hashed binary
+  // still fails. A regression in the matching order — e.g. dropping the
+  // platform-only tier — would show up as this verification silently
+  // becoming a no-op debug log instead.
+  describe("#274 platform-only manifest entry", () => {
+    /** The entry name the mock manifest carries: this runner's actual
+     * platform with an arch suffix that is never the real process.arch, so
+     * the name matches the platform-only tier but not platform+arch. */
+    function platformOnlyName(): string {
+      const otherArch = process.arch === "arm64" ? "armv7" : "arm64";
+      return `stellar-canary-${process.platform}-${otherArch}`;
+    }
+
+    /** A digest that cannot equal any real SHA-256 of the tiny fixture
+     * binary — used to prove which manifest entry verification used. */
+    function unrelatedChecksum(): string {
+      return "c".repeat(64);
+    }
+
+    it("selects the platform-only entry's checksum and uses it for verification", async () => {
+      fs.writeFileSync(binaryPath(), "binary");
+      mockPublishedChecksums(`${sha256(binaryPath())}  ${platformOnlyName()}\n`);
+
+      const installed = await ensureCanaryInstalled(RESOLVED);
+
+      // Resolving proves the platform-only entry's checksum was selected
+      // and matched the binary. On its own this could also pass if the
+      // selection became a no-op (commit/tag pinning, no verification),
+      // which is exactly what the next test rules out.
+      expect(installed).toEqual({ binaryPath: binaryPath(), version: "0.1.0" });
+    });
+
+    it("fails verification against the platform-only entry when the binary differs", async () => {
+      fs.writeFileSync(binaryPath(), "not-the-published-binary");
+      mockPublishedChecksums(`${unrelatedChecksum()}  ${platformOnlyName()}\n`);
+
+      // Capture the rejection and assert on it (the checksum mocks are
+      // single-shot, so the install must run exactly once). The unrelated
+      // digest in the failure message is the proof that the platform-only
+      // entry — not some other fallback — was selected.
+      const error = await ensureCanaryInstalled(RESOLVED).then(
+        () => {
+          throw new Error("expected ensureCanaryInstalled to reject");
+        },
+        (rejection: unknown) => rejection,
+      );
+      expect(error).toBeInstanceOf(InstallationFailedError);
+      expect((error as InstallationFailedError).message).toContain(unrelatedChecksum());
     });
   });
 
