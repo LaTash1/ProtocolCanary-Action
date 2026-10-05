@@ -76,6 +76,10 @@ All notable changes to this project are documented in this file.
 
 ### Testing
 
+- Added a `resolveVersion` test pinning that an explicit whitespace-only
+  `token` is treated as "no token" — the tag-lookup request carries no
+  `Authorization` header at all, matching the documented empty-secret
+  handling ([#262]).
 - Added a `resolveVersion` test simulating a timed-out tags-page request
   (a `"timeout"` event from the underlying `https.get` request), pinning
   that the documented "never throws" contract holds for `fetchTagsPage`'s
@@ -89,6 +93,11 @@ All notable changes to this project are documented in this file.
   of the standard `sha256sum` format: `#` comment lines and `*`-prefixed
   binary-mode entries are parsed and enforced during checksum
   verification ([#275]).
+- Added unit coverage for the checksum-verification fallback when a published
+  checksum manifest exists but names no file matching the runner's platform:
+  `ensureCanaryInstalled` still succeeds with a debug log (commit/tag pinning
+  stands) and never throws `InstallationFailed` for a manifest that simply
+  does not cover this platform ([#259]).
 - Added unit coverage for `runCheck`'s `SIGINT`/`SIGTERM` forwarding to the
   child process, for cleanup of those listeners after settling, and for the
   cancellation branch where the child exits with a null code and a signal.
@@ -106,6 +115,11 @@ All notable changes to this project are documented in this file.
   40-character commit SHA for the matching tag from the GitHub tags API,
   including that the SHA comes from the matching entry rather than the first
   one ([#192]).
+- Added unit coverage for `canary.ts`'s `cacheKeyFor`: one test pinning that
+  the Actions cache key uses `commitSha` even when a `tag` is also present
+  (so two commits under a moving tag can never share a cache entry), and one
+  pinning the `tag` fallback when no `commitSha` was resolved, observed
+  through the keys handed to the cache restore/save calls ([#228]).
 - Added unit coverage for `main.ts`'s `run()`: a run whose process is killed
   by a signal (null exit code) is reported as an execution failure naming the
   signal, and a `writeSummary` rejection on the otherwise-successful path
