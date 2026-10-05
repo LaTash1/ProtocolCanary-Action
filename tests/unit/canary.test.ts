@@ -437,9 +437,12 @@ describe("ensureCanaryInstalled", () => {
     fs.writeFileSync(binaryPath(), "binary");
     // Pick two platforms this runner is definitively not on, so neither a
     // platform+arch nor a platform-only match can succeed on any runner OS
-    // the suite executes on (no runner is both linux and darwin or win32,
-    // and the pair is recomputed from the actual process.platform).
-    const otherPlatforms = process.platform === "linux" ? ["darwin", "win32"] : ["linux", "win32"];
+    // the suite executes on. Recompute the pair from the actual
+    // process.platform so every OS is excluded, not just linux (the CI
+    // matrix also runs windows-latest, where "win32" must not be picked).
+    const otherPlatforms = (["darwin", "linux", "win32"] as const).filter(
+      (platform) => platform !== process.platform,
+    );
     const manifest = [
       `${"a".repeat(64)}  stellar-canary-${otherPlatforms[0]}-x64`,
       `${"b".repeat(64)}  stellar-canary-${otherPlatforms[1]}-arm64`,
