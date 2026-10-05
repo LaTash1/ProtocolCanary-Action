@@ -167,6 +167,54 @@ describe("runCheck", () => {
     );
   });
 
+  // The child's "error" and "close" handlers both guard on the shared
+  // `settled` flag. Node can emit "error" after "close" (e.g. a read error
+  // surfacing on a stream whose process has already exited); the guard makes
+  // such a late event a no-op. Per ES semantics a second settle would be an
+  // unobservable no-op on the promise itself, so what this test pins is the
+  // observable contract the issue asks for (#272): the late "error" neither
+  // changes the already-delivered result nor produces an unhandled rejection
+  // (which fails the whole vitest run), and the child's listeners stay in
+  // the cleaned-up state `close` left them in.
+  it("ignores a late error event after already settling via close (#272)", async () => {
+    // The timeout-escalation suite swaps in fake children via `fakeSpawn`;
+    // that helper lives in another describe block, so swap here directly
+    // (the vi.mock wrapper restores the real spawn after this Once).
+    const child = new FakeChild(true); // exits in response to SIGTERM
+    spawnMock.mockImplementationOnce(() => child as unknown as ChildProcess);
+
+    // runCheck registers its signal-forwarding listeners synchronously
+    // inside the promise executor; capture the baseline to compare against.
+    const baselineInt = process.listenerCount("SIGINT");
+    const baselineTerm = process.listenerCount("SIGTERM");
+
+    const pending = runCheck("fake-canary", ["check"], 60_000);
+    expect(process.listenerCount("SIGINT")).toBe(baselineInt + 1);
+    expect(process.listenerCount("SIGTERM")).toBe(baselineTerm + 1);
+
+    // Emit "close" first (the child exits on SIGTERM, so the result is a
+    // null exit code with the signal set), and let the queue drain so the
+    // promise has really settled before the late event arrives.
+    child.emit("close", null, "SIGTERM");
+    const settled = await pending;
+    expect(settled).toEqual({ exitCode: null, signal: "SIGTERM", stdout: "", stderr: "" });
+
+    // Now fire "error" the way Node would after the fact. If the settled
+    // guard were broken such that the late event rejected the promise
+    // anew, vitest would report an unhandled rejection and fail the run.
+    child.emit("error", new Error("read EIO: terminal attributes"));
+
+    // Let any misplaced second settle surface before asserting.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The already-delivered result is unchanged by the late event.
+    expect(await pending).toEqual(settled);
+    // No listener leaked and none was removed twice: the state is exactly
+    // what close's single cleanup() left behind.
+    expect(process.listenerCount("SIGINT")).toBe(baselineInt);
+    expect(process.listenerCount("SIGTERM")).toBe(baselineTerm);
+  });
+
   // `process` is a process-wide EventEmitter shared by every runCheck call
   // in the host process, so a leaked forwardSignal listener would accumulate
   // across repeated runs (eventually tripping Node's
