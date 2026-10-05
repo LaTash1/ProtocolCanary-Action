@@ -124,8 +124,10 @@ class FakeResponse extends EventEmitter {
 }
 
 class FakeRequest extends EventEmitter {
-  destroy(): void {
-    /* no-op for this fake */
+  destroy(error?: Error): void {
+    if (error) {
+      this.emit("error", error);
+    }
   }
 }
 
@@ -306,6 +308,36 @@ describe("ensureCanaryInstalled", () => {
     );
   });
 
+  // #228: cacheKeyFor is private and zero-argument; its only real branch is
+  // the `commitSha ?? tag` precedence. Pinned through the cache key it hands
+  // to restore/save — the observable surface it drives — so a regression
+  // that let the tag win could never slip through: two different commits
+  // under a moving tag would silently share (and poison) one cache entry.
+  it("prefers commitSha over tag for the cache key, even when both are present (#228)", async () => {
+    cacheMocks.isFeatureAvailableMock.mockReturnValue(true);
+
+    // RESOLVED carries both a tag and a commitSha: the SHA must win.
+    await ensureCanaryInstalled(RESOLVED);
+
+    const expected = `stellar-canary-${process.platform}-${process.arch}-abc123`;
+    expect(cacheMocks.restoreCacheMock).toHaveBeenCalledWith([binaryPath()], expected);
+    expect(cacheMocks.saveCacheMock).toHaveBeenCalledWith([binaryPath()], expected);
+    // And the tag must not leak into either key at all.
+    for (const call of [...cacheMocks.restoreCacheMock.mock.calls, ...cacheMocks.saveCacheMock.mock.calls]) {
+      expect(call[1]).not.toContain("v0.1.0");
+    }
+  });
+
+  it("falls back to the tag for the cache key when commitSha is absent (#228)", async () => {
+    cacheMocks.isFeatureAvailableMock.mockReturnValue(true);
+
+    await ensureCanaryInstalled({ ...RESOLVED, commitSha: undefined });
+
+    const expected = `stellar-canary-${process.platform}-${process.arch}-v0.1.0`;
+    expect(cacheMocks.restoreCacheMock).toHaveBeenCalledWith([binaryPath()], expected);
+    expect(cacheMocks.saveCacheMock).toHaveBeenCalledWith([binaryPath()], expected);
+  });
+
   it("ignores a cache hit whose binary has the wrong version", async () => {
     cacheMocks.isFeatureAvailableMock.mockReturnValue(true);
     cacheMocks.restoreCacheMock.mockResolvedValue("cache-key");
@@ -437,6 +469,62 @@ describe("ensureCanaryInstalled", () => {
       );
       expect(error).toBeInstanceOf(InstallationFailedError);
       expect((error as InstallationFailedError).message).toContain("d".repeat(64));
+    });
+  });
+
+  // #274: selectExpectedChecksum prefers a platform+arch match but falls
+  // back to a platform-only one when the manifest names binaries per
+  // platform without distinguishing architecture (e.g. a single
+  // stellar-canary-linux entry). Pinned through the observable outcome:
+  // the platform-only entry's checksum must be the one selected, so the
+  // binary whose hash matches it verifies and a differently-hashed binary
+  // still fails. A regression in the matching order — e.g. dropping the
+  // platform-only tier — would show up as this verification silently
+  // becoming a no-op debug log instead.
+  describe("#274 platform-only manifest entry", () => {
+    /** The entry name the mock manifest carries: this runner's actual
+     * platform with an arch suffix that is never the real process.arch, so
+     * the name matches the platform-only tier but not platform+arch. */
+    function platformOnlyName(): string {
+      const otherArch = process.arch === "arm64" ? "armv7" : "arm64";
+      return `stellar-canary-${process.platform}-${otherArch}`;
+    }
+
+    /** A digest that cannot equal any real SHA-256 of the tiny fixture
+     * binary — used to prove which manifest entry verification used. */
+    function unrelatedChecksum(): string {
+      return "c".repeat(64);
+    }
+
+    it("selects the platform-only entry's checksum and uses it for verification", async () => {
+      fs.writeFileSync(binaryPath(), "binary");
+      mockPublishedChecksums(`${sha256(binaryPath())}  ${platformOnlyName()}\n`);
+
+      const installed = await ensureCanaryInstalled(RESOLVED);
+
+      // Resolving proves the platform-only entry's checksum was selected
+      // and matched the binary. On its own this could also pass if the
+      // selection became a no-op (commit/tag pinning, no verification),
+      // which is exactly what the next test rules out.
+      expect(installed).toEqual({ binaryPath: binaryPath(), version: "0.1.0" });
+    });
+
+    it("fails verification against the platform-only entry when the binary differs", async () => {
+      fs.writeFileSync(binaryPath(), "not-the-published-binary");
+      mockPublishedChecksums(`${unrelatedChecksum()}  ${platformOnlyName()}\n`);
+
+      // Capture the rejection and assert on it (the checksum mocks are
+      // single-shot, so the install must run exactly once). The unrelated
+      // digest in the failure message is the proof that the platform-only
+      // entry — not some other fallback — was selected.
+      const error = await ensureCanaryInstalled(RESOLVED).then(
+        () => {
+          throw new Error("expected ensureCanaryInstalled to reject");
+        },
+        (rejection: unknown) => rejection,
+      );
+      expect(error).toBeInstanceOf(InstallationFailedError);
+      expect((error as InstallationFailedError).message).toContain(unrelatedChecksum());
     });
   });
 
