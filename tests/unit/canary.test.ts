@@ -124,8 +124,10 @@ class FakeResponse extends EventEmitter {
 }
 
 class FakeRequest extends EventEmitter {
-  destroy(): void {
-    /* no-op for this fake */
+  destroy(error?: Error): void {
+    if (error) {
+      this.emit("error", error);
+    }
   }
 }
 
